@@ -103,11 +103,11 @@ export default function App() {
     };
   }, []);
   useEffect(() => {
-    if (offlineReady) {
+    if (offlineReady && !reading && !toast) {
       notify('Готово к чтению офлайн. Все книги доступны без интернета.');
       setOfflineReady(false);
     }
-  }, [offlineReady, notify, setOfflineReady]);
+  }, [offlineReady, reading, toast, notify, setOfflineReady]);
   const closeReader = useCallback(() => setReading(null), []);
   const openBook = (book: BookRecord, cfi?: string) => {
     setReading({ book, cfi });
