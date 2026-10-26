@@ -1,3 +1,4 @@
+import type { BookInspection } from './engine/inspection';
 export type BookFormat = 'EPUB' | 'FB2' | 'TXT';
 export type BookStatus = 'new' | 'reading' | 'finished';
 export interface ReadingPosition {
@@ -29,6 +30,9 @@ export interface BookFile {
   data: ArrayBuffer;
   original: ArrayBuffer;
   originalType: string;
+  normalizerVersion?: number;
+  normalizedHash?: string;
+  inspection?: BookInspection;
 }
 export interface Annotation {
   id: string;

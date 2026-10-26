@@ -19,7 +19,8 @@ async function showControls(page: import('@playwright/test').Page) {
 async function openSample(page: import('@playwright/test').Page) {
   await page.getByRole('button', { name: 'Читать «Белые ночи»' }).click();
   await expect(page.locator('.reader iframe')).toBeVisible();
-  await expect(page.getByText('Открываем книгу…')).toBeHidden();
+  await expect(page.locator('.reader-mount')).toHaveAttribute('data-layout-state', 'ready');
+  await expect(page.locator('.reader-status')).toHaveCount(0);
   await showControls(page);
 }
 async function position(page: import('@playwright/test').Page) {

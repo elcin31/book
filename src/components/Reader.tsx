@@ -21,6 +21,11 @@ import { usePreferences } from '../lib/settings';
 import type { BookRecord, SearchMatch, TocItem } from '../types';
 import { Dialog, EmptyState, Loading } from './Primitives';
 import { ReaderAppearance } from './ReaderAppearance';
+import { loadReadableBook, restoreBook } from '../lib/bookRecovery';
+import { ReaderFailure, readerFailure, deadline } from '../engine/readerFailure';
+import type { ReaderHealth } from '../engine/readerHealth';
+import { recordReaderDiagnostic, readerDiagnostics } from '../lib/readerDiagnostics';
+import { APP_VERSION } from '../lib/version';
 interface Props {
   book: BookRecord;
   onClose: () => void;
@@ -37,7 +42,14 @@ export default function Reader({ book, onClose, notify, initialCfi }: Props) {
     engine = useRef<ReaderEngine | null>(null),
     lastActive = useRef(Date.now());
   const [loading, setLoading] = useState(true),
-    [error, setError] = useState(''),
+    [error, setError] = useState<ReaderFailure | null>(null),
+    [health, setHealth] = useState<ReaderHealth | null>(null),
+    [attempt, setAttempt] = useState(0),
+    [startAtText, setStartAtText] = useState(false),
+    [hasOriginal, setHasOriginal] = useState(false),
+    [canSkip, setCanSkip] = useState(false),
+    [restoring, setRestoring] = useState(false),
+    [loadingLabel, setLoadingLabel] = useState('Подготавливаем книгу…'),
     [toc, setToc] = useState<TocItem[]>([]),
     [location, setLocation] = useState<ReaderLocation>(),
     [chrome, setChrome] = useState(false),
@@ -64,8 +76,9 @@ export default function Reader({ book, onClose, notify, initialCfi }: Props) {
       try {
         lastActive.current = Date.now();
         await action();
-      } catch {
-        notify('Не удалось перейти к выбранному месту.');
+      } catch (error) {
+        const failure = readerFailure(error, 'navigation');
+        if (failure.code !== 'cancelled') setError(failure);
       }
     },
     [notify],
@@ -77,6 +90,11 @@ export default function Reader({ book, onClose, notify, initialCfi }: Props) {
   };
   useEffect(() => {
     let disposed = false;
+    setLoading(true);
+    setError(null);
+    setHealth(null);
+    setLoadingLabel('Подготавливаем книгу…');
+    highlighted.current.clear();
     const e = new EpubEngine({
       onLocation: (loc) => {
         if (disposed) return;
@@ -106,20 +124,42 @@ export default function Reader({ book, onClose, notify, initialCfi }: Props) {
         if (key === 'ArrowRight' || key === ' ' || key === 'PageDown') actionRef.current.next();
         if (key === 'ArrowLeft' || key === 'PageUp') actionRef.current.prev();
       },
-      onError: notify,
+      onError: (message, failure) => {
+        if (!disposed && failure?.code !== 'cancelled') {
+          setError(failure ?? new ReaderFailure('webkit', 'runtime', message));
+          setLoading(false);
+        }
+      },
+      onState: (state) => {
+        if (!disposed) {
+          setHealth(state);
+        }
+      },
     });
     engine.current = e;
     void (async () => {
       try {
-        const file = await db.files.get(book.id);
-        if (!file)
-          throw new Error('Файл книги не найден на устройстве. Импортируйте книгу заново.');
+        const file = await deadline(
+          loadReadableBook(book.id, () => {
+            if (!disposed) setLoadingLabel('Восстанавливаем книгу из оригинала…');
+          }),
+          60000,
+          'prepare',
+        );
         if (disposed) return;
+        setHasOriginal(Boolean(file.original?.byteLength));
+        setCanSkip(Boolean(file.inspection?.firstTextHref));
+        recordReaderDiagnostic(
+          'prepared',
+          { bytes: file.data.byteLength, sections: file.inspection?.sections.length },
+          book.id,
+        );
         const items = await e.open(
           file.data,
           element.current!,
           settingsRef.current,
-          initialCfi ?? readPosition(book)?.cfi,
+          startAtText ? file.inspection?.firstTextHref : (initialCfi ?? readPosition(book)?.cfi),
+          file.inspection,
         );
         if (disposed) return;
         setToc(items);
@@ -127,8 +167,26 @@ export default function Reader({ book, onClose, notify, initialCfi }: Props) {
         lastActive.current = Date.now();
       } catch (err) {
         if (!disposed) {
-          setError(err instanceof Error ? err.message : 'Не удалось открыть книгу.');
+          const failure = readerFailure(err, 'prepare');
+          if (failure.code === 'cancelled') return;
+          setError(failure);
           setLoading(false);
+          recordReaderDiagnostic(
+            'reader-error',
+            { code: failure.code, kind: failure.stage },
+            book.id,
+          );
+          void db.files
+            .get(book.id)
+            .then((file) => {
+              if (!disposed) {
+                setHasOriginal(Boolean(file?.original?.byteLength));
+                setCanSkip(Boolean(file?.inspection?.firstTextHref));
+              }
+            })
+            .catch(() =>
+              recordReaderDiagnostic('recovery-check-failed', { code: 'storage' }, book.id),
+            );
         }
       }
     })();
@@ -138,7 +196,7 @@ export default function Reader({ book, onClose, notify, initialCfi }: Props) {
       e.destroy();
       engine.current = null;
     };
-  }, [book.id, initialCfi, notify]);
+  }, [book.id, initialCfi, notify, attempt, startAtText]);
   useEffect(() => {
     if (loading) return;
     void operation(() => engine.current?.configure(settings) ?? Promise.resolve());
@@ -357,6 +415,7 @@ export default function Reader({ book, onClose, notify, initialCfi }: Props) {
   const progress = jump ?? Math.round((location?.percent ?? book.position?.percent ?? 0) * 100);
   return (
     <div
+      data-reader-version={APP_VERSION}
       ref={root}
       className={`reader reader-${settings.theme} ${chrome ? '' : 'chrome-hidden'}`}
       style={
@@ -431,26 +490,110 @@ export default function Reader({ book, onClose, notify, initialCfi }: Props) {
         }}
       >
         <div className="reader-mount" ref={element} />
-        {loading && (
-          <div className="reader-loading">
-            <Loading label="Открываем книгу…" />
-          </div>
-        )}
-        {error && (
-          <div className="reader-loading">
-            <EmptyState
-              heading="Книга не открылась"
-              action={
-                <button className="primary-button" onClick={onClose}>
+      </div>
+      {loading && (
+        <div className="reader-loading reader-status">
+          <Loading label={loadingLabel} />
+          <button className="secondary-button" onClick={onClose}>
+            В библиотеку
+          </button>
+        </div>
+      )}
+      {error && !loading && (
+        <div className="reader-loading reader-status" role="alert">
+          <EmptyState
+            heading={
+              ['format', 'no-content'].includes(error.code)
+                ? 'Не удалось прочитать содержимое файла'
+                : error.code === 'position'
+                  ? 'Не удалось восстановить место чтения'
+                  : 'Книга загружена, но возникла ошибка отображения'
+            }
+            action={
+              <div className="reader-recovery-actions">
+                <button className="primary-button" onClick={() => setAttempt((value) => value + 1)}>
+                  Повторить открытие
+                </button>
+                {hasOriginal && (
+                  <button
+                    className="secondary-button"
+                    disabled={restoring}
+                    onClick={async () => {
+                      engine.current?.destroy();
+                      setRestoring(true);
+                      setError(null);
+                      setLoading(true);
+                      setLoadingLabel('Восстанавливаем книгу из оригинала…');
+                      try {
+                        await deadline(restoreBook(book.id), 90000, 'repair');
+                        setAttempt((value) => value + 1);
+                      } catch (error) {
+                        setError(readerFailure(error, 'repair'));
+                        setLoading(false);
+                      } finally {
+                        setRestoring(false);
+                      }
+                    }}
+                  >
+                    Восстановить книгу
+                  </button>
+                )}
+                {canSkip && (
+                  <button
+                    className="secondary-button"
+                    onClick={() => {
+                      setStartAtText(true);
+                      setAttempt((value) => value + 1);
+                    }}
+                  >
+                    Перейти к тексту
+                  </button>
+                )}
+                <button className="text-button" onClick={onClose}>
                   В библиотеку
                 </button>
-              }
-            >
-              {error}
-            </EmptyState>
-          </div>
-        )}
-      </div>
+              </div>
+            }
+          >
+            {error.message}
+          </EmptyState>
+          <details className="reader-diagnostics">
+            <summary>Локальная диагностика</summary>
+            <pre>{readerDiagnostics(book.id)}</pre>
+            <p>
+              Данные остаются на устройстве. Содержимое книги не записывается и не отправляется.
+            </p>
+          </details>
+        </div>
+      )}
+      {!loading && !error && health?.kind === 'blank' && (
+        <div className="reader-loading reader-status">
+          <EmptyState
+            heading="На этой странице нет текста"
+            action={
+              <div className="reader-recovery-actions">
+                <button
+                  className="primary-button"
+                  onClick={() =>
+                    void operation(() => engine.current?.skipToText() ?? Promise.resolve())
+                  }
+                >
+                  Перейти к тексту
+                </button>
+                <button className="secondary-button" onClick={() => actionRef.current.next()}>
+                  Следующая страница
+                </button>
+                <button className="text-button" onClick={onClose}>
+                  В библиотеку
+                </button>
+              </div>
+            }
+          >
+            Пустая страница сохранена в последовательности книги. Выберите переход к следующей
+            странице или тексту.
+          </EmptyState>
+        </div>
+      )}
       <footer
         id="reader-navigation"
         className="reader-footer"

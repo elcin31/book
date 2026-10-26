@@ -1,3 +1,4 @@
+import { APP_VERSION } from '../lib/version';
 import { useEffect, useRef, useState } from 'react';
 import {
   ArrowDownToLine,
@@ -212,7 +213,7 @@ export function Settings({ notify }: { notify: (message: string) => void }) {
         </Dialog>
       )}
       {about && (
-        <Dialog title="BOOK 1.0.1" onClose={() => setAbout(false)}>
+        <Dialog title={`BOOK ${APP_VERSION}`} onClose={() => setAbout(false)}>
           <div className="about-brand">
             BOOK<span>ваша личная библиотека</span>
           </div>
@@ -226,7 +227,7 @@ export function Settings({ notify }: { notify: (message: string) => void }) {
             транскрипции указаны в конце каждой книги.
           </p>
           <p className="control-hint">
-            Версия 1.0.1 · EPUB.js · React · IndexedDB
+            Версия {APP_VERSION} · EPUB.js · React · IndexedDB
             <br />
             DRM, PDF, аудиокниги, синхронизация между устройствами и фиксированная вёрстка EPUB не
             входят в версию 1.0.

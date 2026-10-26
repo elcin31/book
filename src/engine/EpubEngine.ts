@@ -3,6 +3,10 @@ import type { Location } from 'epubjs/types/rendition';
 import type { NavItem } from 'epubjs/types/navigation';
 import type { ReaderEngine, ReaderCallbacks } from './ReaderEngine';
 import type { ReaderSettings, SearchMatch, TocItem } from '../types';
+import type { BookInspection } from './inspection';
+import { ReaderFailure, readerFailure, deadline } from './readerFailure';
+import { checkReaderHealth, waitForMount } from './readerHealth';
+import { recordReaderDiagnostic } from '../lib/readerDiagnostics';
 export const readerColors = {
   paper: { background: '#faf9f5', text: '#2d302b' },
   sepia: { background: '#eee3cc', text: '#534632' },
@@ -29,6 +33,24 @@ const layoutSettings = [
 ] as const;
 export class EpubEngine implements ReaderEngine {
   private element?: HTMLElement;
+  private abort = new AbortController();
+  private opening = true;
+  private checking = false;
+  private visibleKind?: 'text' | 'image' | 'blank';
+  private resume = () => {
+    if (
+      document.visibilityState === 'visible' &&
+      !this.destroyed &&
+      !this.opening &&
+      !this.reflowing
+    )
+      void this.verifyVisible().catch((error) => {
+        const failure = readerFailure(error, 'resume');
+        if (failure.code !== 'cancelled') this.callbacks.onError?.(failure.message, failure);
+      });
+  };
+  private inspection?: BookInspection;
+  private healthTimer?: ReturnType<typeof setTimeout>;
   private book?: Book;
   private rendition?: Rendition;
   private observer?: ResizeObserver;
@@ -59,7 +81,34 @@ export class EpubEngine implements ReaderEngine {
     element: HTMLElement,
     settings: ReaderSettings,
     position?: string,
+    inspection?: BookInspection,
   ): Promise<TocItem[]> {
+    this.inspection = inspection;
+    recordReaderDiagnostic('engine-start', {
+      bytes: data.byteLength,
+      hasPosition: Boolean(position),
+    });
+    try {
+      return await deadline(
+        this.openInternal(data, element, settings, position),
+        90000,
+        'open',
+        this.abort.signal,
+      );
+    } catch (error) {
+      const failure = readerFailure(error);
+      recordReaderDiagnostic('engine-failed', { code: failure.code, kind: failure.stage });
+      this.destroy();
+      throw failure;
+    }
+  }
+  private async openInternal(
+    data: ArrayBuffer,
+    element: HTMLElement,
+    settings: ReaderSettings,
+    position?: string,
+  ): Promise<TocItem[]> {
+    await waitForMount(element, this.abort.signal);
     this.element = element;
     this.settings = settings;
     this.appliedSettings = settings;
@@ -68,11 +117,33 @@ export class EpubEngine implements ReaderEngine {
     this.viewportHeight = Math.floor(element.clientHeight);
     const book = ePub();
     this.book = book;
-    await book.open(data, 'binary');
-    await book.ready;
+    await deadline(book.open(data, 'binary'), 60000, 'epub-open', this.abort.signal);
+    recordReaderDiagnostic('epub-open');
+    await deadline(book.ready, 30000, 'epub-ready', this.abort.signal);
     if (this.destroyed) return [];
     this.sectionCount = (await book.loaded.spine).length;
     this.language = (await book.loaded.metadata).language || 'ru';
+    // An intentional empty XHTML page otherwise has zero column width in
+    // EPUB.js. Keep its place in the spine, giving only the live DOM a layout
+    // marker. It is whitespace, never treated as readable text or persisted.
+    book.spine.hooks.content.register((doc: Document) => {
+      if (doc.body && !doc.body.textContent?.trim() && !doc.body.querySelector('img,svg')) {
+        const marker = doc.createElementNS('http://www.w3.org/1999/xhtml', 'p');
+        marker.setAttribute('aria-hidden', 'true');
+        marker.textContent = '\u00a0';
+        doc.body.append(marker);
+      }
+    });
+    const displayPosition = this.pageTarget(position);
+    if (position?.startsWith('epubcfi(') && displayPosition === position) {
+      try {
+        const range = await deadline(book.getRange(position), 10000, 'cfi', this.abort.signal);
+        if (!range?.startContainer) throw new Error('Invalid CFI');
+      } catch (error) {
+        if (this.abort.signal.aborted) throw readerFailure(error, 'cfi');
+        throw new ReaderFailure('position', 'cfi');
+      }
+    }
     const options = {
       // Numeric sizes disable EPUB.js's additional window-resize observer.
       // Only the settled mount size below is a pagination boundary.
@@ -92,21 +163,38 @@ export class EpubEngine implements ReaderEngine {
     r.hooks.content.register((contents: Contents) => this.setupContents(contents));
     r.on('relocated', (location: Location) => {
       this.lastLocation = location;
-      if (!this.pendingLayout && !this.reflowing) this.emitLocation(location);
+      if (!this.opening && !this.checking && !this.pendingLayout && !this.reflowing)
+        this.emitLocation(location);
     });
     r.on('selected', (cfi: string, contents: Contents) => {
       const selected = contents.window.getSelection()?.toString().trim();
       if (selected) this.emitSelection(cfi, selected);
     });
+    r.on('displayError', () => {
+      recordReaderDiagnostic('section-error', { code: 'resource' });
+      if (!this.opening)
+        this.callbacks.onError?.(
+          'Книга загружена, но возникла ошибка отображения',
+          new ReaderFailure('resource', 'section'),
+        );
+    });
+    r.on('displayed', () => {
+      this.checking = true;
+      clearTimeout(this.healthTimer);
+      this.healthTimer = setTimeout(() => {
+        if (!this.opening && !this.pendingLayout && !this.reflowing)
+          void this.verifyVisible().catch((error) => {
+            const failure = readerFailure(error);
+            this.callbacks.onError?.(failure.message, failure);
+          });
+      }, 100);
+    });
     this.applyTheme(settings);
-    try {
-      await r.display(position);
-    } catch {
-      if (this.destroyed) return [];
-      this.anchor = undefined;
-      await r.display();
-    }
+    await this.displayChecked(displayPosition);
+    await this.verifyVisible();
     if (this.destroyed) return [];
+    this.opening = false;
+    if (this.lastLocation) this.emitLocation(this.lastLocation);
     this.observer = new ResizeObserver(() => {
       if (this.destroyed) return;
       if (
@@ -116,6 +204,7 @@ export class EpubEngine implements ReaderEngine {
         this.queueLayout();
     });
     this.observer.observe(element);
+    document.addEventListener('visibilitychange', this.resume);
     element.dataset.layoutState = 'ready';
     // WebKit can suppress selectionchange in a scriptless srcdoc frame. Read its
     // Selection from the parent realm without enabling scripts in the book.
@@ -126,12 +215,16 @@ export class EpubEngine implements ReaderEngine {
       .then(() => {
         if (this.destroyed) return;
         this.locationsReady = true;
-        if (this.lastLocation && !this.pendingLayout && !this.reflowing)
+        if (
+          this.lastLocation &&
+          !this.opening &&
+          !this.checking &&
+          !this.pendingLayout &&
+          !this.reflowing
+        )
           this.emitLocation(this.lastLocation);
       })
-      .catch(() => {
-        /* CFI restore still works without the optional progress index. */
-      });
+      .catch(() => recordReaderDiagnostic('location-index-unavailable', { code: 'index' }));
     const map = (items: NavItem[]): TocItem[] =>
       items.map((item) => ({
         id: item.id,
@@ -141,8 +234,51 @@ export class EpubEngine implements ReaderEngine {
       }));
     return map(book.navigation.toc);
   }
+  private async guardedDisplay(action: () => Promise<unknown>, stage = 'display') {
+    const r = this.rendition!;
+    this.checking = true;
+    let failed: (error: unknown) => void = () => {};
+    const eventError = new Promise<never>((_, reject) => {
+      failed = () => reject(new ReaderFailure('resource', stage));
+      r.on('displayError', failed);
+    });
+    try {
+      await deadline(Promise.race([action(), eventError]), 30000, stage, this.abort.signal);
+    } finally {
+      r.off('displayError', failed);
+    }
+  }
+  private displayChecked(target?: string) {
+    return this.guardedDisplay(() => this.rendition!.display(this.pageTarget(target)));
+  }
+  private pageTarget(position?: string) {
+    if (!position?.startsWith('epubcfi(')) return position;
+    const section = this.book?.spine.get(position);
+    const known = section && this.inspection?.sections.find((item) => item.href === section.href);
+    if (!known || (known.kind !== 'image' && known.kind !== 'empty')) return position;
+    // EPUB.js can map an image-only page to /4/1:0 without a text node.
+    // Keep the saved locator and restore its exact nontext spine page for open,
+    // bookmarks and reflow. No text position is replaced by a chapter boundary.
+    recordReaderDiagnostic('nontext-position', { kind: known.kind });
+    return section.href;
+  }
+  private async verifyVisible() {
+    if (!this.element || this.destroyed) return;
+    const health = await checkReaderHealth(this.element, this.abort.signal);
+    this.visibleKind = health.kind;
+    recordReaderDiagnostic('visible-content', health);
+    this.checking = false;
+    this.callbacks.onState?.(health);
+    if (!this.opening && !this.pendingLayout && !this.reflowing && this.lastLocation)
+      this.emitLocation(this.lastLocation);
+  }
+  async skipToText() {
+    const target = this.inspection?.firstTextHref ?? this.inspection?.firstContentHref;
+    if (!target) throw new ReaderFailure('no-content', 'skip-to-text');
+    await this.goTo(target);
+  }
   private emitLocation(loc: Location) {
-    if (this.destroyed || !loc.start) return;
+    if (this.destroyed || !loc.start || this.visibleKind === 'blank') return;
     // A resized page may begin before the text the user was reading. Keep that
     // exact CFI until real navigation/scrolling, rather than overwriting it with
     // the new page boundary and accumulating backwards drift on every reflow.
@@ -402,19 +538,18 @@ export class EpubEngine implements ReaderEngine {
       element = this.element,
       settings = this.settings;
     if (this.destroyed || !r || !element || !settings) return;
-    const width = Math.floor(element.clientWidth),
-      height = Math.floor(element.clientHeight);
-    if (!width || !height) {
-      this.pendingLayout = false;
-      return;
-    }
-    const sizeChanged = width !== this.viewportWidth || height !== this.viewportHeight;
-    const typographyChanged = layoutSettings.some(
-      (key) => this.appliedSettings?.[key] !== settings[key],
-    );
     this.pendingLayout = false;
     this.reflowing = true;
+    let healthy = false;
     try {
+      await waitForMount(element, this.abort.signal);
+      if (this.destroyed) return;
+      const width = Math.floor(element.clientWidth),
+        height = Math.floor(element.clientHeight);
+      const sizeChanged = width !== this.viewportWidth || height !== this.viewportHeight;
+      const typographyChanged = layoutSettings.some(
+        (key) => this.appliedSettings?.[key] !== settings[key],
+      );
       const flowChanged = this.appliedSettings?.flow !== settings.flow;
       if (flowChanged) r.flow(settings.flow === 'paginated' ? 'paginated' : 'scrolled-doc');
       this.viewportWidth = width;
@@ -424,23 +559,26 @@ export class EpubEngine implements ReaderEngine {
         await this.waitForLayout(() => {
           // The upstream JS supports an optional CFI omitted from its .d.ts.
           const resize = r.resize as (width: number, height: number, cfi?: string) => void;
-          resize.call(r, width, height, this.anchor);
+          resize.call(r, width, height, this.pageTarget(this.anchor));
         });
       } else if (typographyChanged) {
-        await this.waitForLayout(() => r.display(this.anchor));
+        await this.waitForLayout(() => this.displayChecked(this.anchor));
       }
       this.appliedSettings = settings;
+      await this.verifyVisible();
+      healthy = true;
     } catch (error) {
       if (!this.destroyed)
         this.callbacks.onError?.(
           error instanceof Error ? error.message : 'Не удалось обновить страницу.',
+          readerFailure(error, 'layout'),
         );
     } finally {
       this.reflowing = false;
       if (this.pendingLayout) this.queueLayout();
       else if (!this.destroyed) {
-        element.dataset.layoutState = 'ready';
-        if (this.lastLocation) this.emitLocation(this.lastLocation);
+        element.dataset.layoutState = healthy ? 'ready' : 'error';
+        if (healthy && this.lastLocation) this.emitLocation(this.lastLocation);
       }
     }
   }
@@ -457,7 +595,8 @@ export class EpubEngine implements ReaderEngine {
     try {
       await this.finishLayout();
       this.anchor = undefined;
-      await this.rendition?.next();
+      await this.guardedDisplay(() => this.rendition!.next(), 'next');
+      await this.verifyVisible();
     } finally {
       this.busy = false;
     }
@@ -468,7 +607,8 @@ export class EpubEngine implements ReaderEngine {
     try {
       await this.finishLayout();
       this.anchor = undefined;
-      await this.rendition?.prev();
+      await this.guardedDisplay(() => this.rendition!.prev(), 'previous');
+      await this.verifyVisible();
     } finally {
       this.busy = false;
     }
@@ -476,7 +616,10 @@ export class EpubEngine implements ReaderEngine {
   async goTo(target: string) {
     await this.finishLayout();
     this.anchor = target.startsWith('epubcfi(') ? target : undefined;
-    if (!this.destroyed) await this.rendition?.display(target);
+    if (!this.destroyed) {
+      await this.displayChecked(target);
+      await this.verifyVisible();
+    }
   }
   async goToPercent(percent: number) {
     if (!this.book) return;
@@ -535,6 +678,9 @@ export class EpubEngine implements ReaderEngine {
   }
   destroy() {
     this.destroyed = true;
+    this.abort.abort();
+    clearTimeout(this.healthTimer);
+    document.removeEventListener('visibilitychange', this.resume);
     this.pendingLayout = false;
     this.observer?.disconnect();
     clearTimeout(this.layoutTimer);
@@ -548,7 +694,7 @@ export class EpubEngine implements ReaderEngine {
           await this.locationsTask;
           book.destroy();
         })
-        .catch(() => {});
+        .catch(() => recordReaderDiagnostic('engine-dispose', { code: 'closed' }));
     }
   }
 }

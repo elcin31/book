@@ -189,6 +189,7 @@ async function appearance(page: Page) {
 }
 async function closeAppearance(page: Page) {
   await page.getByRole('button', { name: 'Закрыть', exact: true }).click();
+  await settled(page);
   await controls(page, false);
   await settled(page);
 }

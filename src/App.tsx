@@ -1,3 +1,6 @@
+import { APP_VERSION } from './lib/version';
+import { recordReaderDiagnostic } from './lib/readerDiagnostics';
+import { deadline } from './engine/readerFailure';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useRegisterSW } from 'virtual:pwa-register/react';
@@ -54,7 +57,9 @@ export default function App() {
     [importErrors, setImportErrors] = useState<string[]>([]),
     [dragging, setDragging] = useState(false),
     [online, setOnline] = useState(navigator.onLine),
-    [seedReady, setSeedReady] = useState(false);
+    [seedReady, setSeedReady] = useState(false),
+    [reloadPending, setReloadPending] = useState(false),
+    [applyingUpdate, setApplyingUpdate] = useState(false);
   const input = useRef<HTMLInputElement>(null),
     toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const importingRef = useRef(false);
@@ -63,14 +68,73 @@ export default function App() {
     setToast(message);
     toastTimer.current = setTimeout(() => setToast(''), 6000);
   }, []);
+  const swRegistration = useRef<ServiceWorkerRegistration | null>(null);
   const {
     offlineReady: [offlineReady, setOfflineReady],
     needRefresh: [needRefresh],
     updateServiceWorker,
   } = useRegisterSW({
+    onNeedReload: () => setReloadPending(true),
+    onRegisteredSW: (_url, registration) => {
+      swRegistration.current = registration ?? null;
+    },
     onRegisterError: () =>
       notify('Не удалось подготовить офлайн-режим. Откройте приложение онлайн ещё раз.'),
   });
+  useEffect(() => {
+    let previous = navigator.serviceWorker?.controller;
+    const changed = () => {
+      const current = navigator.serviceWorker.controller;
+      if (previous && current !== previous) setReloadPending(true);
+      previous = current;
+    };
+    navigator.serviceWorker?.addEventListener('controllerchange', changed);
+    return () => navigator.serviceWorker?.removeEventListener('controllerchange', changed);
+  }, []);
+  useEffect(() => {
+    if (reloadPending && !reading && !importing) window.location.reload();
+  }, [reloadPending, reading, importing]);
+  const applyUpdate = async () => {
+    setApplyingUpdate(true);
+    let timer: ReturnType<typeof setInterval> | undefined;
+    try {
+      const registration =
+        swRegistration.current ?? (await navigator.serviceWorker.getRegistration());
+      // Workbox can announce an external update before it has entered waiting.
+      // Wait for that state so a quick tap cannot silently lose the request.
+      await deadline(
+        new Promise<void>((done) => {
+          const check = () => {
+            if (registration?.waiting) done();
+          };
+          timer = setInterval(check, 100);
+          check();
+        }),
+        20000,
+        'sw-waiting',
+      );
+      await updateServiceWorker(true);
+    } catch {
+      notify('Не удалось завершить обновление. Повторите попытку при подключении к интернету.');
+    } finally {
+      clearInterval(timer);
+      setApplyingUpdate(false);
+    }
+  };
+  useEffect(() => {
+    const update = () => {
+      if (document.visibilityState === 'visible' && navigator.onLine)
+        void swRegistration.current
+          ?.update()
+          .catch(() => recordReaderDiagnostic('sw-update-check', { code: 'network' }));
+    };
+    document.addEventListener('visibilitychange', update);
+    const timer = setInterval(update, 60000);
+    return () => {
+      document.removeEventListener('visibilitychange', update);
+      clearInterval(timer);
+    };
+  }, []);
   const appTheme = usePreferences((s) => s.appTheme);
   useEffect(() => {
     const media = matchMedia('(prefers-color-scheme: dark)');
@@ -274,7 +338,7 @@ export default function App() {
             </p>
           </div>
           <span className="version-label">
-            BOOK 1.0.1 <span>С любовью к чтению</span>
+            BOOK {APP_VERSION} <span>С любовью к чтению</span>
           </span>
         </div>
       </aside>
@@ -372,6 +436,7 @@ export default function App() {
   const detailBook = books?.find((b) => b.id === details);
   return (
     <div
+      data-book-version={APP_VERSION}
       onDragOver={(e) => {
         e.preventDefault();
         if (e.dataTransfer.types.includes('Files')) setDragging(true);
@@ -505,11 +570,13 @@ export default function App() {
           </p>
         </Dialog>
       )}
-      {needRefresh && !reading && (
+      {needRefresh && !reading && !importing && (
         <div className="update-banner">
           <Sparkles size={17} />
           <span>Доступна новая версия BOOK</span>
-          <button onClick={() => void updateServiceWorker(true)}>Обновить</button>
+          <button disabled={applyingUpdate} onClick={() => void applyUpdate()}>
+            Обновить
+          </button>
         </div>
       )}
       {toast && (

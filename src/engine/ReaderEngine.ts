@@ -1,3 +1,6 @@
+import type { BookInspection } from './inspection';
+import type { ReaderFailure } from './readerFailure';
+import type { ReaderHealth } from './readerHealth';
 import type { ReaderSettings, ReadingPosition, TocItem, SearchMatch } from '../types';
 export interface ReaderLocation extends ReadingPosition {
   page: number;
@@ -14,7 +17,8 @@ export interface ReaderCallbacks {
   onSelection: (selection: ReaderSelection) => void;
   onTap: (zone: 'left' | 'center' | 'right') => void;
   onKey: (key: string) => void;
-  onError?: (message: string) => void;
+  onError?: (message: string, failure?: ReaderFailure) => void;
+  onState?: (health: ReaderHealth) => void;
 }
 export interface ReaderEngine {
   open: (
@@ -22,8 +26,10 @@ export interface ReaderEngine {
     element: HTMLElement,
     settings: ReaderSettings,
     position?: string,
+    inspection?: BookInspection,
   ) => Promise<TocItem[]>;
   next: () => Promise<void>;
+  skipToText: () => Promise<void>;
   previous: () => Promise<void>;
   goTo: (target: string) => Promise<void>;
   goToPercent: (percent: number) => Promise<void>;

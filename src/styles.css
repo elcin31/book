@@ -3974,3 +3974,54 @@ input[type='range'] {
     font-size: 11px;
   }
 }
+.reader-status {
+  inset: calc(var(--reader-safe-top) + 12px) calc(var(--reader-safe-right) + 16px)
+    calc(var(--reader-safe-bottom) + 18px) calc(var(--reader-safe-left) + 16px);
+  z-index: 7;
+  background: var(--reader-background);
+  flex-direction: column;
+  justify-content: flex-start;
+  overflow: auto;
+  padding: 20px;
+}
+.reader-status .loading {
+  min-height: 110px;
+}
+.reader-status .empty-state {
+  min-height: 0;
+  padding: 20px 8px;
+  background: transparent;
+}
+.reader-status .empty-state h3 {
+  font-size: 23px;
+  line-height: 1.4;
+}
+.reader-recovery-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 15px;
+  max-width: 340px;
+}
+.reader-recovery-actions .primary-button,
+.reader-recovery-actions .secondary-button {
+  margin-top: 0;
+}
+.reader-diagnostics {
+  max-width: 100%;
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 15px;
+}
+.reader-diagnostics pre {
+  max-height: 180px;
+  overflow: auto;
+  font-size: 10px;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.reader-diagnostics p {
+  margin-top: 10px;
+  line-height: 1.7;
+}
