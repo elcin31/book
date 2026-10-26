@@ -6,16 +6,20 @@ export const defaultSettings: ReaderSettings = {
   font: 'literary',
   fontSize: 20,
   lineHeight: 1.65,
-  margins: 24,
+  margins: 16,
+  verticalMargins: 12,
   letterSpacing: 0,
   paragraphSpacing: 0.7,
-  align: 'justify',
+  paragraphIndent: 1.1,
+  hyphenate: true,
+  showProgress: true,
+  align: 'left',
   flow: 'paginated',
   bold: false,
   brightness: 100,
   keepAwake: false,
 };
-interface Preferences {
+export interface Preferences {
   reader: ReaderSettings;
   goal: number;
   appTheme: 'light' | 'dark' | 'auto';
@@ -23,6 +27,12 @@ interface Preferences {
   resetReader: () => void;
   setGoal: (goal: number) => void;
   setAppTheme: (theme: Preferences['appTheme']) => void;
+}
+// Zustand's default shallow merge would replace the entire reader object with
+// the 1.0 settings. Fill only new fields; retain every existing preference.
+export function mergePreferences(persisted: unknown, current: Preferences): Preferences {
+  const saved = (persisted ?? {}) as Partial<Preferences>;
+  return { ...current, ...saved, reader: { ...defaultSettings, ...saved.reader } };
 }
 export const usePreferences = create<Preferences>()(
   persist(
@@ -35,6 +45,6 @@ export const usePreferences = create<Preferences>()(
       setGoal: (goal) => set({ goal }),
       setAppTheme: (appTheme) => set({ appTheme }),
     }),
-    { name: 'book-preferences', version: 1 },
+    { name: 'book-preferences', version: 1, merge: mergePreferences },
   ),
 );

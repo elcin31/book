@@ -8,10 +8,19 @@ async function ready(page: import('@playwright/test').Page) {
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Читать «Белые ночи»' })).toBeVisible();
 }
+async function showControls(page: import('@playwright/test').Page) {
+  if (await page.locator('.reader').evaluate((el) => el.classList.contains('chrome-hidden'))) {
+    const stage = page.locator('.reader-stage');
+    const size = await stage.boundingBox();
+    await stage.click({ position: { x: size!.width / 2, y: size!.height / 2 } });
+  }
+  await expect(page.locator('.reader-header')).toBeVisible();
+}
 async function openSample(page: import('@playwright/test').Page) {
   await page.getByRole('button', { name: 'Читать «Белые ночи»' }).click();
   await expect(page.locator('.reader iframe')).toBeVisible();
   await expect(page.getByText('Открываем книгу…')).toBeHidden();
+  await showControls(page);
 }
 async function position(page: import('@playwright/test').Page) {
   return page.evaluate(() => {
@@ -91,6 +100,7 @@ test('real FB2 import, duplicate handling, chapter navigation and malicious file
   await expect(page.frameLocator('.reader iframe').first().locator('body')).toContainText(
     'Абзац 1.',
   );
+  await showControls(page);
   await page.getByRole('button', { name: 'Оглавление', exact: true }).click();
   await page.getByRole('button', { name: 'Вторая глава', exact: true }).click();
   await expect(page.frameLocator('.reader iframe').first().locator('body')).toContainText(

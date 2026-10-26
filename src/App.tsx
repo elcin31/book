@@ -274,7 +274,7 @@ export default function App() {
             </p>
           </div>
           <span className="version-label">
-            BOOK 1.0 <span>С любовью к чтению</span>
+            BOOK 1.0.1 <span>С любовью к чтению</span>
           </span>
         </div>
       </aside>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   ArrowLeft,
@@ -32,14 +32,15 @@ export default function Reader({ book, onClose, notify, initialCfi }: Props) {
   const settings = usePreferences((s) => s.reader);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
-  const element = useRef<HTMLDivElement>(null),
+  const root = useRef<HTMLDivElement>(null),
+    element = useRef<HTMLDivElement>(null),
     engine = useRef<ReaderEngine | null>(null),
     lastActive = useRef(Date.now());
   const [loading, setLoading] = useState(true),
     [error, setError] = useState(''),
     [toc, setToc] = useState<TocItem[]>([]),
     [location, setLocation] = useState<ReaderLocation>(),
-    [chrome, setChrome] = useState(true),
+    [chrome, setChrome] = useState(false),
     [panel, setPanel] = useState<Panel>(null),
     [selection, setSelection] = useState<ReaderSelection | null>(null),
     [note, setNote] = useState(''),
@@ -94,15 +95,18 @@ export default function Reader({ book, onClose, notify, initialCfi }: Props) {
       onTap: (zone) => {
         lastActive.current = Date.now();
         if (panelsRef.current) return;
-        if (settingsRef.current.flow === 'scrolled' || zone === 'center') setChrome((c) => !c);
-        else if (zone === 'left') actionRef.current.prev();
-        else actionRef.current.next();
+        if (zone === 'center') setChrome((c) => !c);
+        else if (settingsRef.current.flow === 'paginated') {
+          if (zone === 'left') actionRef.current.prev();
+          else actionRef.current.next();
+        }
       },
       onKey: (key) => {
         if (panelsRef.current) return;
         if (key === 'ArrowRight' || key === ' ' || key === 'PageDown') actionRef.current.next();
         if (key === 'ArrowLeft' || key === 'PageUp') actionRef.current.prev();
       },
+      onError: notify,
     });
     engine.current = e;
     void (async () => {
@@ -137,12 +141,29 @@ export default function Reader({ book, onClose, notify, initialCfi }: Props) {
   }, [book.id, initialCfi, notify]);
   useEffect(() => {
     if (loading) return;
-    const timer = setTimeout(
-      () => void operation(() => engine.current?.configure(settings) ?? Promise.resolve()),
-      160,
-    );
-    return () => clearTimeout(timer);
+    void operation(() => engine.current?.configure(settings) ?? Promise.resolve());
   }, [settings, loading, operation]);
+  useEffect(() => {
+    if (CSS.supports('height: 100dvh')) return;
+    let frame = 0;
+    const resize = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        root.current?.style.setProperty(
+          '--reader-viewport-height',
+          `${Math.round(window.visualViewport?.height ?? window.innerHeight)}px`,
+        );
+      });
+    };
+    resize();
+    window.addEventListener('resize', resize);
+    window.visualViewport?.addEventListener('resize', resize);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener('resize', resize);
+      window.visualViewport?.removeEventListener('resize', resize);
+    };
+  }, []);
   const highlighted = useRef(new Map<string, string>());
   useEffect(() => {
     if (loading) return;
@@ -336,20 +357,39 @@ export default function Reader({ book, onClose, notify, initialCfi }: Props) {
   const progress = jump ?? Math.round((location?.percent ?? book.position?.percent ?? 0) * 100);
   return (
     <div
+      ref={root}
       className={`reader reader-${settings.theme} ${chrome ? '' : 'chrome-hidden'}`}
-      style={{ background: colors.background, color: colors.text }}
+      style={
+        {
+          background: colors.background,
+          color: colors.text,
+          '--reader-background': colors.background,
+          '--reader-horizontal-margin': `${settings.margins}px`,
+          '--reader-vertical-margin': `${settings.verticalMargins}px`,
+          '--reader-progress-space': settings.showProgress ? '14px' : '0px',
+        } as CSSProperties
+      }
       onPointerDown={() => {
         lastActive.current = Date.now();
       }}
     >
-      <header className="reader-header">
+      <button
+        className="reader-controls-trigger icon-button"
+        aria-label={chrome ? 'Скрыть панель чтения' : 'Показать панель чтения'}
+        aria-expanded={chrome}
+        aria-controls="reader-menu reader-navigation"
+        onClick={() => setChrome((visible) => !visible)}
+      >
+        <Maximize2 size={18} />
+      </button>
+      <header id="reader-menu" className="reader-header" aria-hidden={!chrome} inert={!chrome}>
         <button className="reader-back" onClick={onClose} aria-label="Вернуться в библиотеку">
           <ChevronLeft size={23} />
           <span>Библиотека</span>
         </button>
         <div className="reader-book-title">
           <strong>{book.title}</strong>
-          <small>{book.author}</small>
+          <small>{location?.chapter || book.author}</small>
         </div>
         <div className="reader-header-actions">
           <button
@@ -384,12 +424,9 @@ export default function Reader({ book, onClose, notify, initialCfi }: Props) {
           </button>
         </div>
       </header>
-      <div className="reader-chapter-label">{location?.chapter || book.title}</div>
       <div
         className="reader-stage"
         style={{
-          marginInline: settings.margins,
-          width: `calc(100% - ${settings.margins * 2}px)`,
           filter: `brightness(${settings.brightness}%)`,
         }}
       >
@@ -414,7 +451,12 @@ export default function Reader({ book, onClose, notify, initialCfi }: Props) {
           </div>
         )}
       </div>
-      <footer className="reader-footer">
+      <footer
+        id="reader-navigation"
+        className="reader-footer"
+        aria-hidden={!chrome}
+        inert={!chrome}
+      >
         <div className="reader-progress-row">
           <button className="icon-button" onClick={() => setPanel('toc')} aria-label="Оглавление">
             <List size={21} />
@@ -477,14 +519,10 @@ export default function Reader({ book, onClose, notify, initialCfi }: Props) {
           </button>
         </div>
       </footer>
-      {!chrome && (
-        <button
-          className="restore-chrome icon-button"
-          aria-label="Показать панель чтения"
-          onClick={() => setChrome(true)}
-        >
-          <Maximize2 size={18} />
-        </button>
+      {settings.showProgress && !loading && !error && (
+        <div className="reader-mini-progress" aria-hidden={chrome}>
+          <span aria-label={`Прочитано ${progress}%`}>{progress}%</span>
+        </div>
       )}
       {panel && (
         <Dialog

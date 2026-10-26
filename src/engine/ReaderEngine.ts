@@ -14,6 +14,7 @@ export interface ReaderCallbacks {
   onSelection: (selection: ReaderSelection) => void;
   onTap: (zone: 'left' | 'center' | 'right') => void;
   onKey: (key: string) => void;
+  onError?: (message: string) => void;
 }
 export interface ReaderEngine {
   open: (

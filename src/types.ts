@@ -57,8 +57,12 @@ export interface ReaderSettings {
   fontSize: number;
   lineHeight: number;
   margins: number;
+  verticalMargins: number;
   letterSpacing: number;
   paragraphSpacing: number;
+  paragraphIndent: number;
+  hyphenate: boolean;
+  showProgress: boolean;
   align: 'justify' | 'left';
   flow: 'paginated' | 'scrolled';
   bold: boolean;

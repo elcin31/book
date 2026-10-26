@@ -2,8 +2,10 @@ import { AlignJustify, AlignLeft, Check, Moon, Sun } from 'lucide-react';
 import { usePreferences } from '../lib/settings';
 import { Range, Toggle } from './Primitives';
 import { readerColors } from '../engine/EpubEngine';
+import { useState } from 'react';
 export function ReaderAppearance() {
   const { reader: s, setReader, resetReader } = usePreferences();
+  const [customMargins, setCustomMargins] = useState(false);
   return (
     <div className="appearance-controls">
       <div className="theme-options">
@@ -73,13 +75,65 @@ export function ReaderAppearance() {
         step={0.05}
         onChange={(lineHeight) => setReader({ lineHeight })}
       />
+      <fieldset className="margin-presets">
+        <legend>Поля страницы</legend>
+        <div>
+          {(
+            [
+              ['Узкие', 14],
+              ['Стандартные', 22],
+              ['Широкие', 36],
+            ] as const
+          ).map(([label, value]) => (
+            <button
+              key={label}
+              type="button"
+              aria-pressed={!customMargins && s.margins === value}
+              onClick={() => {
+                setCustomMargins(false);
+                setReader({ margins: value });
+              }}
+            >
+              {label}
+              <small>{value} px</small>
+            </button>
+          ))}
+          <button
+            type="button"
+            aria-pressed={customMargins || ![14, 22, 36].includes(s.margins)}
+            onClick={() => setCustomMargins(true)}
+          >
+            Пользовательские<small>{s.margins} px</small>
+          </button>
+        </div>
+      </fieldset>
       <Range
-        label="Поля страницы"
+        label="Горизонтальные поля"
         value={s.margins}
         min={8}
         max={48}
         unit=" px"
-        onChange={(margins) => setReader({ margins })}
+        onChange={(margins) => {
+          setCustomMargins(true);
+          setReader({ margins });
+        }}
+      />
+      <Range
+        label="Вертикальные поля"
+        value={s.verticalMargins}
+        min={0}
+        max={48}
+        unit=" px"
+        onChange={(verticalMargins) => setReader({ verticalMargins })}
+      />
+      <Range
+        label="Отступ первой строки"
+        value={s.paragraphIndent}
+        min={0}
+        max={2}
+        step={0.1}
+        unit=" em"
+        onChange={(paragraphIndent) => setReader({ paragraphIndent })}
       />
       <Range
         label="Расстояние между буквами"
@@ -137,6 +191,18 @@ export function ReaderAppearance() {
           </button>
         </div>
       </div>
+      <Toggle
+        label="Автоматические переносы"
+        description="Используется словарь языка книги, доступный в браузере"
+        value={s.hyphenate}
+        onChange={() => setReader({ hyphenate: !s.hyphenate })}
+      />
+      <Toggle
+        label="Прогресс без панелей"
+        description="Небольшой процент у нижнего безопасного края"
+        value={s.showProgress}
+        onChange={() => setReader({ showProgress: !s.showProgress })}
+      />
       <Toggle label="Плотный текст" value={s.bold} onChange={() => setReader({ bold: !s.bold })} />
       <Toggle
         label="Не выключать экран"
